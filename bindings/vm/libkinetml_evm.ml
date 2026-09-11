@@ -1,0 +1,1 @@
+include Libkinetml_evm_template.Stubs (Libkinetml_evm_stubs_generated)

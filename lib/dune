@@ -1,0 +1,23 @@
+(include_subdirs qualified)
+
+(rule
+ (targets version.ml)
+ (deps (universe))
+ (action
+  (with-stdout-to
+   %{targets}
+   (bash
+    "echo \"let hash = \\\"$(git rev-parse --short HEAD 2>/dev/null || echo '(unknown revision)')\\\"\""))))
+
+(library
+ (name kinet_lib)
+ (public_name kinet-spec.kinet_lib)
+ (libraries
+  zarith
+  lens
+  digestif
+  secp256k1-internal
+  yojson
+  ppx_deriving_yojson.runtime)
+ (preprocess
+  (pps lens.ppx_deriving ppx_deriving_yojson)))

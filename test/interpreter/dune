@@ -1,0 +1,27 @@
+(test
+ (name opcodes)
+ (libraries kinet_lib test_utils alcotest qcheck-core qcheck-alcotest))
+
+(test
+ (name control)
+ (libraries kinet_lib test_utils alcotest qcheck-core qcheck-alcotest))
+
+(test
+ (name memory)
+ (libraries kinet_lib test_utils alcotest qcheck-core qcheck-alcotest))
+
+(test
+ (name storage)
+ (libraries kinet_lib test_utils alcotest qcheck-core qcheck-alcotest))
+
+(test
+ (name eip_145)
+ (libraries kinet_lib test_utils alcotest qcheck-core qcheck-alcotest))
+
+(test
+ (name eip_1153)
+ (libraries kinet_lib test_utils alcotest qcheck-core qcheck-alcotest))
+
+(test
+ (name eip_7939)
+ (libraries kinet_lib test_utils alcotest qcheck-core qcheck-alcotest))

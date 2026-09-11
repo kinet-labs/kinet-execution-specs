@@ -1,0 +1,14 @@
+(test
+ (name numeric)
+ (modules numeric)
+ (libraries kinet_lib test_utils alcotest qcheck-core qcheck-alcotest))
+
+(test
+ (name rlp)
+ (modules rlp)
+ (libraries kinet_lib test_utils alcotest qcheck-core qcheck-alcotest))
+
+(test
+ (name mpt)
+ (modules mpt)
+ (libraries kinet_lib test_utils alcotest qcheck-core qcheck-alcotest yojson))

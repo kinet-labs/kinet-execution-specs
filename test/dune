@@ -1,0 +1,3 @@
+(library
+ (name test_utils)
+ (libraries kinet_lib alcotest qcheck-core qcheck-alcotest))

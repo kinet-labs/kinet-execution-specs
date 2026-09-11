@@ -1,0 +1,4 @@
+(library
+ (name common)
+ (libraries kinet_lib ctypes ctypes.stubs ctypes-foreign)
+ (modules common))

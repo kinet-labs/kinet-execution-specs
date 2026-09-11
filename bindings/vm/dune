@@ -1,0 +1,37 @@
+(library
+ (name libkinetml_evm_template)
+ (libraries kinet_lib common c_evmc ctypes ctypes.stubs)
+ (modules libkinetml_evm_template))
+
+(executable
+ (name libkinetml_evm_gen)
+ (libraries libkinetml_evm_template)
+ (modules libkinetml_evm_gen))
+
+(rule
+ (deps libkinetml_evm_gen.exe)
+ (targets
+  libkinetml_evm_stubs_generated.ml
+  libkinetml_evm_stubs_generated.c
+  libkinetml_evm_stubs_generated.h)
+ (action
+  (run %{exe:libkinetml_evm_gen.exe} libkinetml_evm_stubs_generated)))
+
+(executable
+ (name libkinetml_evm)
+ (libraries libkinetml_evm_template)
+ (modules libkinetml_evm libkinetml_evm_stubs_generated)
+ (foreign_stubs
+  (language c)
+  (include_dirs %{project_root}/third_party/evmc/include)
+  ; Suppress unused variable errors in generated stubs (C)
+  (flags
+   (-g -Wno-unused-variable -Wno-visibility))
+  (names libkinetml_evm_stubs_generated))
+ ; Suppress unused variable errors in generated stubs (OCaml)
+ (flags
+  (:standard -g -linkall -w -27))
+ (preprocess
+  (pps lens.ppx_deriving ppx_deriving_yojson))
+ (modes
+  (native shared_object)))

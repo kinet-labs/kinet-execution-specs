@@ -1,0 +1,277 @@
+open Kinet_lib
+open Kinet_lib.Chain.Ethereum
+open Kinet_lib.Numeric
+open Kinet_lib.Byte_string
+
+(* Generators and printers for our types. *)
+module QCheck2 = struct
+  include QCheck2
+  module Print = struct
+    include Print
+    let u256 x = Format.sprintf "%s (%s)" (U256.to_string x) (U256.to_hex_string x)
+    let i256 x = Format.sprintf "%s (%s)" (I256.to_string x) (I256.to_hex_string x)
+    let z : Z.t t =
+     fun x ->
+      (if Z.(x < zero) then Format.sprintf "%s (-%s)" (Z.to_string x) else Format.sprintf "%s")
+        (Bytes.to_hex_string (Z.to_bits x))
+    let rlp : Rlp.t t = Rlp.to_string
+    let byte_string = Bytes.to_hex_string
+  end
+
+  module Gen = struct
+    include Gen
+    let uint8 = char_range '\x00' '\xff'
+    let u256 : U256.t t =
+      (* Uniformly distributed random strings are very unlikely to be negative.
+         Bool shrinks towards false so this generator will shrink towards positive numbers. *)
+      let* negative = bool in
+      let* bytes_be =
+        if negative then (
+          (* Always generate 32 bytes, force MSB to be 1. Note that bytes will shrink towards 0xff *)
+          let* bytes = bytes_size ~gen:(char_range ~origin:'\xff' '\x00' '\xff') (return 32) in
+          Stdlib.Bytes.(
+            set bytes 0 (Char.chr (Int.logor (Char.code (get bytes 0)) 0x80)) ;
+            return (to_string bytes) ) )
+        else string_size ~gen:uint8 (int_bound 32)
+      in
+      return U256.(of_bytes_be_exn bytes_be)
+
+    let i256 : I256.t t =
+      let* num = u256 in
+      return (U256.as_signed num)
+
+    let z : Z.t t =
+      let* negative = bool in
+      let* bytes_le = string_size ~gen:uint8 nat in
+      let abs = Z.of_bits bytes_le in
+      return (if negative then Z.neg abs else abs)
+
+    let rec depth = function Rlp.Bytes _ -> 0 | Rlp.List ls -> 1 + List.(fold_left max 0 (map depth ls))
+    let string ~nonempty : Bytes.t t =
+      let size = if nonempty then ( + ) 1 <$> small_nat else small_nat in
+      string_size size
+
+    let rlp ~nonempty : Rlp.t t =
+      fix
+        (fun self depth ->
+          let bytes_case = (fun bs -> Rlp.Bytes bs) <$> string ~nonempty in
+          if depth > 2 then bytes_case
+          else
+            frequency
+              [(3 + (2 * depth), bytes_case); (1, (fun l -> Rlp.List l) <$> small_list (self (depth + 1)))] )
+        0
+  end
+end
+
+let check_prop ~name ?print ?(count = 10000) generator property =
+  QCheck_alcotest.to_alcotest (QCheck2.Test.make ?print ~name ~count generator property)
+
+let u256 =
+  ( module struct
+    include U256
+    let pp = Fmt.of_to_string U256.to_string
+  end : Alcotest.TESTABLE
+    with type t = U256.t )
+
+let b32 =
+  ( module struct
+    include B32
+    let pp = Fmt.of_to_string B32.to_hex_string
+  end : Alcotest.TESTABLE
+    with type t = B32.t )
+
+let rlp =
+  ( module struct
+    include Rlp
+    let pp = Fmt.of_to_string Rlp.to_string
+  end : Alcotest.TESTABLE
+    with type t = Rlp.t )
+
+let status_code =
+  ( module struct
+    include Evmc.Result.StatusCode
+    let pp = Fmt.of_to_string (fun s -> Evmc.Result.StatusCode.to_string s)
+    let equal = Stdlib.( = )
+  end : Alcotest.TESTABLE
+    with type t = Evmc.Result.StatusCode.t )
+
+let account =
+  ( module struct
+    include Chain.Ethereum.Account
+    let pp = Fmt.of_to_string (fun acc -> Yojson.Safe.pretty_to_string (Account.to_yojson acc))
+  end : Alcotest.TESTABLE
+    with type t = Chain.Ethereum.Account.t )
+
+let expect_result_status (status : Evmc.Result.StatusCode.t) (result : Evmc.Result.t) =
+  Alcotest.check' status_code ~msg:"Result status code is correct" ~expected:status ~actual:result.status_code
+
+let expect_ok (result : ('a, string) result) : 'a =
+  match result with Ok value -> value | Error err -> Alcotest.fail err
+
+module type PARAMS = sig
+  val chain_id : Uint.t
+  val revision : Chain.Kinet.Revision.active
+  val trace : bool
+  val debug_tstore : bool
+end
+
+module Kinet_eight : PARAMS = struct
+  let chain_id = Chain.Kinet.Testnet.chain_id
+  let revision = `Eight
+  let trace = false
+  let debug_tstore = false
+end
+
+module Kinet_nine : PARAMS = struct
+  let chain_id = Chain.Kinet.Testnet.chain_id
+  let revision = `Nine
+  let trace = false
+  let debug_tstore = false
+end
+
+module Make (P : PARAMS) = struct
+  module Evm = struct
+    module Evm0 = Host.Instantiate (P) (Vm.Make (P))
+
+    (* Unfold one level of recursion to get access to the full signature of Vm *)
+    module Vm = Vm.Make (P) (Evm0.Host)
+    module Host = Host.Make (P) (Vm)
+  end
+  module Vm = Evm.Vm
+
+  let test_message
+      ?(prepare_env : State.TransactionState.t -> State.TransactionState.t = Fun.id)
+      ?(prepare_vm : unit Evm.Vm.M.t = Evm.Vm.M.return ())
+      ?(check_vm_state : unit Evm.Vm.M.t option)
+      ?(check_env_state : State.TransactionState.t -> unit = fun _ -> ())
+      ?(check_result : Evmc.Result.t -> unit = expect_result_status Evmc.Result.StatusCode.Success)
+      (msg : Evmc.Message.t) =
+    (* This is partially duplicated from vm.ml as it needs to inject assssertion-checking.
+     With better VM instrumentation we can remove the duplication *)
+    let action =
+      let open Evm.Host in
+      let open Kinet.State (State.TransactionState) in
+      let$ tx_context = get_tx_context in
+      let$ host = get in
+      let module Exe = Evm.Vm.Executor (struct
+        let execution_environment = Evm.Vm.ExecutionEnvironment.make tx_context msg msg.code
+      end) in
+      let gas = Gas.of_uint64 msg.gas in
+      let memory_capacity = Uint.of_uint32 msg.memory_capacity in
+      let state = Evm.Vm.MachineState.initial ~host ~gas ~memory_capacity in
+      let res, state =
+        Evm.Vm.M.(
+          let$ () = prepare_vm in
+          let$ () = Exe.run in
+          match check_vm_state with None -> return () | Some check -> check )
+          state
+      in
+      check_env_state state.host ;
+      let$ () = put state.host in
+      return
+        ( match res with
+        | Ok () ->
+            Evmc.Result.
+              { status_code = Success
+              ; gas_left = Uint.to_uint64 state.gas
+              ; gas_refund = Integer.to_int64 state.gas_refund
+              ; output_data = state.output_buffer
+              ; create_address = Address.zero }
+        | Error err -> (
+          match err with
+          | Success -> assert false
+          | Revert ->
+              (* If a contract finishes with a REVERT instruction, remaining gas is refunded and the output
+                 buffer is returned, see YP (152) *)
+              Evmc.Result.
+                { status_code = err
+                ; gas_left = Uint.to_uint64 state.gas
+                ; gas_refund = 0L
+                ; output_data = state.output_buffer
+                ; create_address = Address.zero }
+          | _ -> Evmc.Result.failure err ) )
+    in
+    let result, state = action (prepare_env State.TransactionState.empty) in
+    (* If the caller specified a VM postcondition but execution finished with an early abort,
+     the postcondition did not get checked and so the test preemptively fails *)
+    if Option.is_some check_vm_state then expect_result_status Evmc.Result.StatusCode.Success result ;
+    check_result result ;
+    (result, state)
+
+  let bytecode_to_call_message code =
+    Evmc.(
+      Message.
+        { kind = CallKind.Call
+        ; delegated = false
+        ; static = false
+        ; depth = 0l
+        ; gas = 100_000_000L
+        ; recipient = Address.zero
+        ; sender = Address.zero
+        ; input_data = Bytes.empty
+        ; value = U256.of_int 1000
+        ; create2_salt = B32.zeros
+        ; code_address = Address.zero
+        ; code
+        ; memory_capacity = Uint.to_uint32 Evm.Vm.Memory.max_memory_usage } )
+
+  let expect_stack expected_stack =
+    let open Evm.Vm.M in
+    let$ stack = !Evm.Vm.MachineState.stack in
+    Alcotest.check' Alcotest.int ~msg:"Stack after execution has correct size"
+      ~expected:(List.length expected_stack) ~actual:(List.length stack) ;
+    return
+      (List.iteri
+         (fun i (expected, actual) ->
+           Alcotest.check' u256 ~msg:(Format.sprintf "Output %d is correct" i) ~expected ~actual )
+         (List.combine expected_stack stack) )
+
+  let test_bytecode_pure bc ~input_stack ~output_stack =
+    let input_stack_depth = List.length input_stack in
+    let open Evm.Vm.M in
+    let msg = bytecode_to_call_message bc in
+    ignore
+      (test_message
+         ~prepare_vm:
+           (let$ () = Evm.Vm.MachineState.stack := input_stack in
+            Evm.Vm.MachineState.stack_depth := input_stack_depth )
+         ~check_vm_state:(expect_stack output_stack) msg )
+
+  let opcode_test_name opcode inputs output =
+    let inputs = List.map U256.to_hex_string inputs |> String.concat ", " in
+    Format.sprintf "%s(%s) -> %s" (Opcode.to_string opcode) inputs (U256.to_hex_string output)
+
+  let test_case_opcode_1 opcode x_0 y =
+    let test_name = opcode_test_name opcode [x_0] y in
+    let bc = Bytes.make 1 (Opcode.to_byte opcode) in
+    Alcotest.test_case test_name `Quick (fun () -> test_bytecode_pure bc ~input_stack:[x_0] ~output_stack:[y])
+
+  let test_case_opcode_2 opcode x_0 x_1 y =
+    let test_name = opcode_test_name opcode [x_0; x_1] y in
+    let bc = Bytes.make 1 (Opcode.to_byte opcode) in
+    Alcotest.test_case test_name `Quick (fun () ->
+        test_bytecode_pure bc ~input_stack:[x_0; x_1] ~output_stack:[y] )
+
+  let test_case_opcode_3 opcode x_0 x_1 x_2 y =
+    let test_name = opcode_test_name opcode [x_0; x_1; x_2] y in
+    let bc = Bytes.make 1 (Opcode.to_byte opcode) in
+    Alcotest.test_case test_name `Quick (fun () ->
+        test_bytecode_pure bc ~input_stack:[x_0; x_1; x_2] ~output_stack:[y] )
+
+  let test_cases_opcode_1 opcode cases =
+    (Opcode.to_string opcode, List.map (fun (x_0, y) -> test_case_opcode_1 opcode x_0 y) cases)
+  let test_cases_opcode_2 opcode cases =
+    (Opcode.to_string opcode, List.map (fun ((x_0, x_1), y) -> test_case_opcode_2 opcode x_0 x_1 y) cases)
+  let test_cases_opcode_3 opcode cases =
+    ( Opcode.to_string opcode
+    , List.map (fun ((x_0, x_1, x_2), y) -> test_case_opcode_3 opcode x_0 x_1 x_2 y) cases )
+end
+
+let ( $/ ) path file = Filename.concat path file
+
+let rec traverse_folder (path : string) : (string * string) Seq.t =
+  Sys.readdir path
+  |> Array.to_seq
+  |> Seq.concat_map (fun entry ->
+      let file = path $/ entry in
+      if Sys.is_directory file then traverse_folder file else Seq.singleton (path, entry) )

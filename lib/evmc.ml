@@ -1,4 +1,4 @@
-(** A high-level version of the {{:https://github.com/category-labs/evmc}Category Labs fork} of the
+(** A high-level version of the {{:https://github.com/kinet-labs/evmc}Kinet Labs fork} of the
     {{:https://evmc.ethereum.org/}EVMC interface}.
 
     The EVMC interface is a de-facto Ethereum standard that allows EVM implementations to be written against an
